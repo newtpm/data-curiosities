@@ -46,7 +46,7 @@ vignettes/*.pdf
 # HTML & Images
 *.png
 *.jpg
-*.html
+#*.html
 
 # Excel & .csv
 *.csv
