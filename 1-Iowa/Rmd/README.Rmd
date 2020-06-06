@@ -1,0 +1,319 @@
+---
+title: "Iowa Liquor Sales Analysis"
+output: github_document
+
+
+---
+
+<style type="text/css">
+.main-container {
+  max-width: 1250px;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+
+# Objective 
+
+The State of Iowa has published a really interesting dataset around their liquor sales. I thought it would be interesting to see how sales/consumption patterns changed as a result of coronavirus. The data is for wholesale sales from the distributor to the retail outlet so is not directly indicative of consumer patterns, but our period of interest is 11 weeks so we feel it is as good a proxy as we can expect. 
+
+Source data is 19M purchases by Iowa Class “E” liquor licensees,  dating back to 2012, and can be downloaded from [data.iowa.gov](https://data.iowa.gov/Sales-Distribution/Iowa-Liquor-Sales/m3tr-qhgy). 
+
+
+
+```{r, message=F}
+library(tidyverse)
+library(lubridate)
+library(wesanderson)
+library(janitor)
+library(gt)
+library(ggiraph)
+
+liq <- read_rds("../input/iowa_liq_short.Rds")  %>%
+  mutate(Inv = str_remove_all(Inv, "INV-"),
+         InvLine = str_sub(Inv, -5, -1),
+         Inv = str_sub(Inv, 1, 6))
+
+#wes_cols <- c(wes_palette("GrandBudapest2"), wes_palette("GrandBudapest1"))
+wes_cols <- c(wes_palette("Darjeeling2"), rev(wes_palette("Darjeeling1")))
+
+gt(head(liq, 1))
+```
+
+# Exploratory Data Analysis
+
+Our reduced data set is from `r min(liq$Date)` through `r max(liq$Date)` and contains `r round(nrow(liq)/1e6, 2)`M rows and totals \$`r round(sum(liq$Sales)/1e6, 2)`M in wholesale sales or about `r round(sum(liq$SalesVol)/1e6, 2)`M litres of booze. 
+
+### Disclaimer
+
+I know nothing about the liquor industry (apart from what I learned as a consumer). Consequently, I may have things wrong here - so this analysis is for curiosity purposes only. 
+
+Also, this data is just liquor sales for the state of Iowa... so I recognize that sales patterns may differ elsewhere and beer/wine substitutions are ignored. 
+
+## Conronavirus Lockdown 
+
+Iowa never actually issued a "Stay-at-Home" order, but business were restricted, some employees were laid off, and employers told their staff to work from home where possible. For our analysis, we assume any coronovirus impact started with Week 11 (Monday March 11, 2020) and continuing to Week 22 (which is the extent of our dataset). For convenience we will call this the "Lockdown Period". 
+
+### Sales by Week
+
+Judging from the Year over Year sales, there is a noticeable increase in sales during the lockdown period. 
+
+```{r fig.align='center', fig.width=12}
+liq %>%
+  group_by(Year, Week) %>%
+  summarise(Sales = sum(Sales)) %>%
+  filter(Week != 53) %>% # partial
+  ggplot(aes(Week, Sales/1e6, group = Year, color = factor(Year))) +
+  geom_line(size = 1.1) +
+  geom_vline(xintercept = c(11, 22), linetype = 2) +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1), 
+      legend.position = "bottom", legend.title=element_blank()) +
+  labs(title = NULL, x = "Week", 
+       y= "Sales (in $M's)") +
+  scale_x_continuous(breaks = seq(1, 53, by = 3), expand = c(0, 0)) +
+  scale_y_continuous(breaks = seq(0, 10, by = .5), expand = c(0, 0)) +
+  scale_color_manual(values = wes_cols[c(4, 2)])
+
+```
+
+## Top 2020 Brands
+
+```{r}
+top <- liq %>% 
+  group_by(Brand) %>%
+  summarise(Sales = sum(Sales)/1e6) %>%
+  arrange(desc(Sales))
+
+
+```
+
+### Category Tastes
+
+We can determine that overall sales increased almost 10% over the same period in 2019, but what is the composition of that increase. As this was not a typical Y-Y increase, it is interesting to see how tastes changed given that people were going to be more home-bound than normal. 
+
+```{r}
+lock <- liq %>%
+  filter(Week >= 11 & Week <= 22)
+
+lock %>% 
+  group_by(Year, Type) %>%
+  summarise(Sales = round(sum(Sales)/1e6, 2)) %>%
+  pivot_wider(names_from = Year, values_from = Sales ) %>%
+  mutate(Change = `2020` - `2019`) %>%
+  arrange(desc(`2020`)) %>%
+  adorn_totals() %>%
+  mutate(`Change%` = round(Change / `2019` * 100, 2)) %>%
+  gt() %>%
+    tab_header(
+    title = "Store Purchases 2019-2020 (in $M)",
+    subtitle = "For Coronavirus Related Weeks 11-22"
+  ) %>%
+    fmt_number(
+    columns = vars(`2019`, `2020`),
+    decimals = 1
+  ) %>%
+  tab_style(
+    style = list(
+      cell_fill(color = wes_cols[2]),
+      cell_text(color = "white")
+      ),
+    locations = cells_body(
+      rows = Type == "Total")
+  )
+```
+
+
+
+### Taste Notes 
+
+Whisky (including Bourbon) is the most common liquor type and it remained the go-to tipple of choice during lockdown - with the 14% increase representing the largest Y-Y dollar increase of $3.3M, and represents 44% of the total increase. We will look later at a substitution effect, to see if people changed to whisky from their normal drink. 
+
+Relatively large decreases were seen in Specialty (-28%), which includes packages with glasses or some other promotion, and Schnapps, which I imagine is more of a party (shots) drink. 
+
+Interesting increases are seen in Liqueurs (13%) and a dollar increase almost that of Vodka - and is due to the large increases in Fireball (see below). The largest relative increase is in the Neutral Grain Spirits category which is Everclear and Moonshine type products. I was also surprised to see Brandy sales increased by 32%, but that might be because I think it is awful stuff. Gin was both a smaller percent of sales in absolute terms, and was constant Y-Y. 
+
+## Brand Tastes
+
+The item/product names are varied and inconsistent across years, while the Item# has no apparent logic built in. So in the absence of a mapping table, I made a few changes to the more pominent item names to better align with the brand. (If interested, expand the code below.)
+
+```{r}
+lock_item <- lock %>%
+  group_by(Year, Brand) %>%
+  summarise(Sales = sum(Sales)/ 1e6) %>%
+  ungroup() %>%
+  pivot_wider(names_from = Year, values_from = Sales ) %>%
+  mutate(Change = round(`2020` - `2019`, 2),
+         `Change%` = round(Change / `2019` * 100, 2)) %>%
+  arrange(desc(Change))
+
+head(lock_item, 12) %>%
+  gt() %>%
+    tab_header(
+    title = "Top 12 Brand Changes 2019-2020 (in $M)",
+    subtitle = "For Coronavirus Related Weeks 11-22"
+  ) %>%
+    fmt_number(
+    columns = vars(`2019`, `2020`),
+    decimals = 2
+  ) %>%
+  tab_style(
+    style = list(
+      cell_fill(color = wes_cols[3]),
+      cell_text(color = "white")
+      ),
+    locations = cells_body(
+      rows = Brand == "Total")
+  )
+
+```
+
+```{r, fig.height=7, fig.width=12, warning=F}
+
+gg1 <- lock_item %>%
+  filter(`2020` > 0.25) %>%
+  ggplot(aes(Change, `Change%`, size = `2020`)) +
+  geom_point_interactive(aes(tooltip = Brand), color = wes_cols[5], alpha = 0.9) +
+  geom_vline(xintercept = 0, linetype = 2, color = "grey50") +
+  geom_hline(yintercept = 0, linetype = 2, color = "grey50") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1), 
+      legend.position = "bottom") +
+  labs(size = "2020 Sales") +
+  labs(title = "Week 11-22 Y-Y Change for Brands Over $250K in 2020 Sales", x = "Change (in $M)", 
+       y= "Change %") +
+  scale_x_continuous(breaks = seq(-5, 5, by = .1)) +
+  scale_y_continuous(breaks = seq(-50, 200, by = 20)) 
+  
+
+girafe(ggobj = gg1, height_svg = 3, width_svg = 9, 
+       options = list(opts_tooltip(use_fill = TRUE))) 
+```
+
+By hovering over the above chart, we can easily see that Absolut and Jack Daniels were the most negatively impacted as they both say declining Y-Y sales despite the overal market increase.  
+
+## Size Tastes
+
+Here we look to see if stores ordered larger than normal sizes.
+
+```{r fig.align='center', fig.width=12}
+
+gal <- lock %>%
+  group_by(Year, BottleVol) %>%
+  summarise(Sales = sum(Sales)/1e6) %>%
+  ungroup() %>%
+  mutate(BottleVol = factor(BottleVol)) %>%
+  pivot_wider(names_from = Year, values_from = Sales, values_fill = 0)
+
+ggplot(gal) +
+  geom_segment(aes(x = BottleVol, xend = BottleVol, y = `2019`, yend = `2020`), color = "grey80",
+               arrow = arrow(length = unit(0.4, "cm"))) +
+  geom_point( aes(x=BottleVol, y=`2019`), color= wes_cols[4], size=4 ) +
+  geom_point( aes(x=BottleVol, y=`2020`), color= wes_cols[3], size=4, alpha = 0.5 ) +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1), 
+      legend.position = "bottom", legend.title=element_blank()) +
+  labs(title = "2019 to 2020 Change in Sales by Bottle Size", x = "Bottle Volume (in ml)", 
+       y= "Sales (in $M)") +
+  scale_y_continuous(breaks = seq(0, 50, by = 2), expand = c(0, 0.1)) +
+  coord_flip()
+
+```
+
+## Major Sizes
+
+```{r fig.align='center', fig.width=12}
+
+gal2 <- lock %>%
+  filter(BottleVol %in% c(375, 750, 1000, 1750),
+         Brand %in% head(top$Brand, 8)) %>%
+  group_by(Year, Brand, BottleVol) %>%
+  summarise(Sales = sum(Sales)/1e6) %>%
+  ungroup() %>%
+  mutate(BottleVol = factor(BottleVol)) %>%
+  pivot_wider(names_from = Year, values_from = Sales, values_fill = 0)
+
+
+ggplot(gal2) +
+  geom_segment(aes(x = BottleVol, xend = BottleVol, y = `2019`, yend = `2020`), color = "grey80",
+               arrow = arrow(length = unit(0.4, "cm"))) +
+  geom_point( aes(x=BottleVol, y=`2019`), color= wes_cols[4], size=4 ) +
+  geom_point( aes(x=BottleVol, y=`2020`), color= wes_cols[3], size=4, alpha = 0.5 ) +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1), 
+      legend.position = "bottom", legend.title=element_blank()) +
+  labs(title = "2019 to 2020 Change in Sales by Bottle Size",
+       subtitle = "Top 8 Brands by 2020 Sales", x = "Bottle Volume (in ml)", 
+       y= "Sales (in $M)") +
+  scale_y_continuous(breaks = seq(0, 50, by = .5), expand = c(0, 0.1)) +
+  coord_flip() +
+  facet_wrap(~Brand, nrow = 2)
+
+```
+
+
+# Pricing Lawsuits
+
+According to the [Des Moines Register](https://www.desmoinesregister.com/story/news/2019/12/17/iowa-illegally-marked-up-liquor-prices-years-lawsuit-alleges/2680983001/), *"The [Iowa Alcoholic Beverages Division (ABD)] is the state's exclusive liquor wholesaler. It buys liquor from suppliers and can mark up the price by 50% under Iowa law before selling it to retailers, such as grocery stores, liquor stores and other liquor license holders"*
+
+The Register also adds that there has been a whistleblower suit filed about complaints that the state's markup was larger than the legislated 50% maximum. There is a related lawsuit [here](https://www.courthousenews.com/wp-content/uploads/2019/12/Polk-LACL-683.pdf). So, with that context, and a nicely relevant dataset, I thought it would be worth taking a look at pricing. 
+
+## Pricing Data
+
+We are provided with two pricing fields, `UnitCost` which is the price to the ABD from the manufacturer, and the `UnitPrice` which is the marked-up price charged to retailers. However, it does appears that the given `UnitPrice` does not always equal the total Sales divided by the Units purchased which is surely a more plausible figure than the published price. 
+
+```{r}
+prices <- liq %>%
+  mutate(CalcPrice = Sales / Units,
+         PriceDiff = CalcPrice - UnitPrice,
+         NomMkup = (UnitPrice / UnitCost -1) * 100,
+         CalcMkup = round((CalcPrice / UnitCost -1) * 100, 1),
+         Over = PriceDiff * Units,
+         Store = str_sub(Store, 1, 25),
+         Item = str_sub(Item, 1, 25)) %>%
+  select(Inv, InvLine, Date, Store, Item, UnitCost, UnitPrice, NomMkup, Units,
+         Sales, CalcPrice, CalcMkup, PriceDiff, Over)
+
+
+```
+
+If we define the Nominal Markup as (`UnitPrice` / `UnitCost` -1), then we can see there are  `r round(sum(round(prices$NomMkup, 0) == 50)/1e6, 3)`M transactions (99.8%) that were nominally markedup at the maximum 50%. If we define Actual Markup as (`CalcPrice` / `UnitCost` -1), it was 50% `r round(sum(round(prices$CalcMkup, 0) == 50)/1e6, 3)`M times or 96.7% of the time. Below we take a look at the distribution of calculated markups that are NOT exactly 50%.
+
+```{r fig.align='center', fig.width=12, warning=F}
+prices2 <- prices %>%
+  filter(round(CalcMkup, 0) != 50)
+
+prices2 %>%
+  ggplot(aes(CalcMkup)) +
+  geom_histogram(binwidth = 5, fill = wes_cols[2], color = wes_cols[1]) +
+  geom_vline(xintercept = 50) +
+  xlim(-75, 200) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 60, hjust = 1), 
+      legend.position = "bottom") +
+  labs(size = "2020 Sales") +
+  labs(title = "Markup Distribution (Excl 50% Markup Exactly)", x = "Markup Bin", 
+       y= "Count") +
+  scale_x_continuous(breaks = seq(-75, 200, by = 10), limits = c(-75, 200)) +
+  scale_y_continuous(breaks = seq(0, 2e5, by = 5e3)) 
+
+```
+
+Of the `r round(nrow(prices2)/1e3, 1)`K transactions that are not marked-up exactly 50%, we can see that `r round(sum(prices2$CalcMkup < 50) / nrow(prices2) * 100, 1)`% are less than the statutory limit. This is permissable, so we will remove these and just examine the transactions over the 50% limit. 
+
+```{r}
+prices3 <- prices2 %>%
+  filter(CalcMkup > 50)
+
+
+
+
+```
+
+
+### Invoices
+
+```{r}
+prices4 <- prices %>%
+  group_by(Inv) %>%
+  summarise(Over = sum(Over)) %>%
+  arrange(desc(Over))
+```
+
